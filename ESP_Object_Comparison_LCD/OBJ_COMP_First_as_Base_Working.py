@@ -4,12 +4,12 @@ import serial
 import time
 from collections import defaultdict
 
-# --- Serial Configuration (Update COM Port as Needed) ---
-ser = serial.Serial('COM9', 115200, timeout=10)  # Update COM port to match your TTL module
-time.sleep(20)
+# --- Serial Configuration ---
+ser = serial.Serial('COM9', 115200, timeout=5)
+time.sleep(1)
 
 # --- YOLO Parameters ---
-whT = 224  # Resize image for YOLO
+whT = 224
 confThreshold = 0.3
 nmsThreshold = 0.3
 
@@ -22,13 +22,17 @@ net = cv2.dnn.readNetFromDarknet("yolov3.cfg", "yolov3.weights")
 net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
 net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
+
+
 # --- Trigger ESP32 to Capture Image ---
 def request_image():
     ser.write(b"CAPTURE\n")
     print("[Python] Sent: CAPTURE")
+    
 
 # --- Receive Image from ESP32 (JPEG) ---
 def receive_image():
+    
     length_bytes = ser.read(4)
     if len(length_bytes) != 4:
         print("[Error] Timeout or no data received")
@@ -85,65 +89,79 @@ def detect_and_count(img):
         x, y, w, h = bbox[i]
         cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 255), 2)
         cv2.putText(img, f"{label}", (x, y - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
 
     return img, count_dict
 
 # --- Baseline Storage ---
-baseline_counts = None  # Dictionary of object label → count
+baseline_counts = None
 
-# --- Compare and Send Missing Objects to ESP32 ---
+# --- Send Results to ESP32 for LCD Display ---
 def send_result(current_counts):
     global baseline_counts
-
+    detected_msg = ",".join([f"{k}:{v}" for k, v in current_counts.items()])
+    
     if baseline_counts is None:
         baseline_counts = current_counts.copy()
         print("[Baseline] Stored as reference:", baseline_counts)
-        return
-
-    missing = []
-    for obj in baseline_counts:
-        base_count = baseline_counts[obj]
-        curr_count = current_counts.get(obj, 0)
-        if curr_count < base_count:
-            missing.append(obj)  # Only send label (no quantity)
-
-
-     # 2. Build detection summary string: "person:1,chair:2"
-    detected_msg = ",".join([f"{k}:{v}" for k, v in current_counts.items()])
-
-
-
-       # 3. Combine missing + detected into final message
-    if missing:
-        msg = f"Missing: {','.join(missing)}|{detected_msg}"
+        if not detected_msg:
+            msg = "No objects|Baseline Set"
+        else:
+            msg = f"{detected_msg}|Baseline Set"
     else:
-        msg = f"No missing objects|{detected_msg}"
+        missing = []
+        for obj in baseline_counts:
+            base_count = baseline_counts[obj]
+            curr_count = current_counts.get(obj, 0)
+            if curr_count < base_count:
+                missing.append(obj)
+
+        #detected_msg = ",".join([f"{k}:{v}" for k, v in current_counts.items()])
+        
+        if missing:
+            if not detected_msg:
+                msg = f"Missing: {','.join(missing)}|Nothing detected"
+            else:
+                msg = f"Missing: {','.join(missing)}|{detected_msg}"
+        else:
+            if not detected_msg:
+                msg = "No missing objects|Nothing detected"
+            else:
+                msg = f"No missing objects|{detected_msg}" 
 
     framed = f"<{msg}>"
     print(f"[Python] Sending to ESP: {framed}")
-    ser.write(framed.encode())
+    ser.write(f"{framed}\n".encode())  #NEWLINE added for correct parsing
 
 # --- Main Loop ---
+last_detection_time = time.time()
+
 while True:
-    print("\n[Main] Requesting new image...")
     request_image()
     img = receive_image()
     if img is None:
         continue
 
-    result_img, counts = detect_and_count(img)
-    send_result(counts)
+    cv2.imshow("Live YOLO Detection", img)
 
-    cv2.imshow("YOLO Detection", result_img)
-    print("Press 'q' to quit, 'r' to reset baseline, any other key to continue...")
-    key = cv2.waitKey(0) & 0xFF
+    current_time = time.time()
+    if current_time - last_detection_time >= 20:
+        print("\n[Main] 20 seconds elapsed. Running object detection...")
+        result_img, counts = detect_and_count(img.copy())
+        send_result(counts)
+        cv2.imshow("Live YOLO Detection", result_img)
+        last_detection_time = current_time
+
+    key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
         break
-    elif key == ord('r'):
+    if key == ord('r'):
         baseline_counts = None
-        print("[Python] Baseline reset. Next image will be new reference.")
+        print("[Python] Baseline reset. Next detection will set new reference.")
 
-# Cleanup
 cv2.destroyAllWindows()
-ser.close()
+ser.close()       
+
+
+
+
